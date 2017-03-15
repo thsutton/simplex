@@ -7,6 +7,7 @@ import           Control.Monad.Except
 import           Data.Array
 import           Data.Function
 import           Data.List
+import           Data.Maybe
 import           Data.Traversable
 import           Data.Word
 
@@ -16,9 +17,12 @@ someFunc = putStrLn "someFunc"
 -- | Let's just pretend.
 type Nat = Word16
 
-
-
 -- * Problem descriptions
+
+data Obj
+  = Max [Rational]
+  | Min [Rational]
+  deriving (Eq, Ord, Show)
 
 data Cons
   = LEq { coeffs :: [Rational], bound :: Rational }
@@ -29,6 +33,14 @@ data Cons
 needsSlack :: Cons -> Bool
 needsSlack (Eq{}) = False
 needsSlack _      = True
+
+-- | Canonicalise objective function.
+--
+-- We take *minimise* to be the canonical representation of objective
+-- functions in what follows.
+objectify :: Obj -> [Rational]
+objectify (Min o) = o
+objectify (Max o) = negate `map` o
 
 -- | Canonicalise constraints.
 --
@@ -57,7 +69,7 @@ build
   -> [Cons] -- ^ Constraints
   -> Either String Tableau
 -}
-build obj constraints = initialise obj (slack constraints)
+build obj constraints = initialise (objectify obj) (slack constraints)
 
 -- * Tableaux
 
@@ -106,11 +118,56 @@ step tab = do
 -- We chose the most
 selectPivot :: MonadError String m => Tableau -> m (Nat,Nat)
 selectPivot tab = do
-  let (rows, cols) = bounds tab
-  let (cost, col) = maximum . map flip $ assocs (costs tab)
-  return (0,col)
+  let (_, (rows, cols)) = bounds tab
+  -- Let's find the pivot column, row, and element.
+  colI <- findCol tab
+  rowI <- findRow colI tab
+  let div = tab ! (rowI, colI)
+  replacement <- getRow rowI tab
+
+  {-
+   - Update the solution by replacing the variables selected:
+   - For each (other) row, add
+   -}
+  tab <- updateRow tab ([0..cols] \\ [rowI]) (\current ->
+    do
+      let v = current ! colI
+      return $ zipArray (-) current replacement
+      )
+  throwError (renderTableau tab)
+  return (0, colI)
   where
+    zipArray :: Ix i => (a -> b -> c) -> Array i a -> Array i b -> Array i c
+    zipArray op as bs =
+      let as' = assocs as
+          bs' = assocs bs
+      in array (bounds as) (zipWith (\(ix,a) (_,b) -> (ix,a `op` b)) as' bs')
+    updateRow :: MonadError String m => Tableau -> [Nat] -> (Array Nat Rational -> m (Array Nat Rational)) -> m Tableau
+    updateRow tab [] f     = return tab
+    updateRow tab (r:rs) f = return tab
+    findRow n tab = do
+      let (_, (rows, cols)) = bounds tab
+      col <- tail . elems <$> getCol n tab
+      b <- tail . elems <$> getCol cols tab
+      return . snd . minimum . filter (isJust . fst) $ zip (zipWith comp b col) [1..]
+    comp :: Rational -> Rational -> Maybe Rational
+    comp q r
+      | r == 0 = Nothing
+      | q / r > 0 = Just (q/r)
+      | otherwise = Nothing
     flip (a,b) = (b,a)
+    findCol tab = return . snd . minimum . filter (\(c,ix) -> c /= 0) . map flip $ assocs (costs tab)
+    getCol :: MonadError String m => Nat -> Tableau -> m (Array Nat Rational)
+    getCol n tab =
+      let (_, (rows, cols)) = bounds tab
+          col = map (\((r,_),v) -> (r,v)) . filter (\((r,c),v)-> c == n) $ assocs tab
+      in return . array (0,rows) $ col
+
+    getRow :: MonadError String m => Nat -> Tableau -> m (Array Nat Rational)
+    getRow n tab =
+      let (_, (rows, cols)) = bounds tab
+          row = map (\((_,c),v) -> (c,v)) . filter (\((r,c),v) -> r == n) $ assocs tab
+      in return . array (0,cols) $ row
 
 costs :: Tableau -> Array Nat Rational
 costs tab =
